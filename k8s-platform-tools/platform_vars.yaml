@@ -1,0 +1,269 @@
+common:
+  provider: "aws"
+  aws_account_id: "111122223333"
+  domain: "cloudon.work"
+  statebucketsuffix: tf-state-010
+  owner: "cloudon"
+  aws_region: "us-east-2"
+  vpc_id: "vpc-XXXXXXXXXXXXXX"
+  private_subnet_ids: ["subnet-XXXXXXXXXXXXXX", "subnet-XXXXXXXXXXXXXX", "subnet-XXXXXXXXXXXXXX"]
+  database_subnet_ids: ["subnet-XXXXXXXXXXXXXX", "subnet-XXXXXXXXXXXXXX", "subnet-XXXXXXXXXXXXXX"]
+  eks_cluster_name: "dev-eks-cluster"
+  cluster_oidc_provider: "oidc.eks.us-east-2.amazonaws.com/id/XXXXXXXXXXXXXX"
+  environment: "dev"
+  route53_hosted_zone_id: "Z0123456789ABCDEF"
+  common_tags:
+    Environment: "dev"
+    Owner: "cloudon"
+    ManagedBy: "Terragrunt"
+    Team: "platform"
+    ClusterName: "dev-eks-cluster"
+
+Platform:
+  Tools: 
+    airflow:
+      inputs:
+        airflow_version: "2.7.1"
+        instance_type: "t3.medium"
+
+    argocd:
+      inputs:
+        argocd_version: "2.1.2"
+        admin_password: "demo-password-123!"
+        metrics_retention: "7d"
+        alert_slack_webhook: "https://hooks.slack.com/services/XXXXX/YYYYY/ZZZZZ"
+        alert_email_to: "platform-alerts@cloudon.work"
+        repositories:
+          - name: "infrastructure"
+            url: "https://github.com/cloudon-one/aws-terragrunt-configuration.git"
+            path: "kubernetes"
+            credentials:
+              username: "git-user"
+              password: "github-pat-token"
+            type: "git"      
+          - name: "applications"
+            url: "https://github.com/cloudon-one/aws-cleaner.git"
+            path: "kubernetes/apps"
+            credentials:
+              ssh_private_key: |
+                -----BEGIN RSA PRIVATE KEY-----
+                MIIEpAIBAAKCAQEAxxxx
+                ... (SSH private key content) ...
+                -----END RSA PRIVATE KEY-----
+          - name: "private-gitlab" #example of private gitlab repository
+            url: "https://gitlab.company.com/platform/services.git"
+            path: "manifests"
+            credentials:
+              tls_client_cert: |
+                -----BEGIN CERTIFICATE-----
+                MIIDXTCCAkWgAwIBAgIJALXXX
+                ... (Client certificate content) ...
+                -----END CERTIFICATE-----
+              tls_client_cert_key: |
+                -----BEGIN PRIVATE KEY-----
+                MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIB
+                ... (Client certificate key content) ...
+                -----END PRIVATE KEY-----
+            insecure: false     
+        github_apps: # example of GitHub App configuration
+          - id: "123456"
+            installation_id: "654321"
+            private_key: |
+              -----BEGIN RSA PRIVATE KEY-----
+              MIIEowIBAAKCAQEAxxxx
+              ... (GitHub App private key content) ...
+              -----END RSA PRIVATE KEY-----  
+        repositories_cert:
+          - server_name: "gitlab.company.com"
+            cert_data: |
+              -----BEGIN CERTIFICATE-----
+              MIIDfTCCAmWgAwIBAgIJALXXX
+              ... (CA certificate content) ...
+              -----END CERTIFICATE-----   
+        git_repositories: # example of Git repositories configuration
+          - name: "frontend-app"
+            url: "https://github.com/cloudon-one/frontend.git"
+            path: "k8s/base"
+          - name: "backend-services"
+            url: "https://github.com/cloudon-one/backend.git"
+            path: "deploy/overlays/dev"
+          - name: "shared-resources"
+            url: "git@github.com:cloudon-one/shared.git"
+            path: "common/resources"         
+
+    atlantis:
+      inputs:
+        iam_role_arn: "arn:aws:iam::123456789012:role/atlantis-server-role"
+        github_token: "github-token-123!"
+        github_webhook_secret: "webhook-secret"
+        gitlab_token: "gitlab-token-123!"
+        gitlab_webhook_secret: "web-secret-123!"
+        webhook_url: "https://atlantis.cloudon.work/events"
+        org_whitelist: ["cloudon-one"]
+        repo_config_json: |
+          [{
+          "repositories": [
+            "cloudon-one/aws-terragrunt-configuration",
+            "cloudon-one/aws-terraform-modules"
+            "cloudon-one/k8s-platform-tools",
+            "cloudon-one/k8s-platform-modules"
+          ]
+        ingress_host: "atlantis.cloudon.work"
+        ingress_annotations:
+          kubernetes.io/ingress.class: "nginx"
+          cert-manager.io/cluster-issuer: "letsencrypt"
+          nginx.ingress.kubernetes.io/ssl-redirect: true
+        namespace_labels: 
+          app: "atlantis"
+          release: "atlantis"
+        service_account_annotations: 
+          eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/dev-atlantis-role"    
+
+    cert-manager:
+      inputs:
+        service_account_annotations:
+          eks.amazonaws.com/role-arn: "arn:aws:iam::${local.platform_vars.common.aws_account_id}:role/${local.platform_vars.common.environment}-cert-manager"
+
+    external-dns:
+      inputs:
+        service_account:
+          name: "external-dns"
+          annotations:
+            eks.amazonaws.com/role-arn: "arn:aws:iam::${local.platform_vars.common.aws_account_id}:role/${local.platform_vars.common.environment}-cert-manager-role"
+        
+    external-secrets:
+      inputs:
+        chart_version: "0.9.9"
+        service_account:
+          name: "external-secrets"
+          annotations:
+            eks.amazonaws.com/role-arn: "arn:aws:iam::${local.platform_vars.common.aws_account_id}:role/${local.platform_vars.common.environment}-external-secrets-role"
+        oidc:
+          provider_arn: "arn:aws:iam::${local.platform_vars.common.aws_account_id}:oidc-provider/${local.platform_vars.common.eks_oidc_provider}"
+          provider_url: "${local.platform_vars.common.eks_oidc_provider}"    
+        kms:
+          key_arns: 
+          - "arn:aws:kms:${local.platform_vars.common.default_region}:${local.platform_vars.common.aws_account_id}:key/${local.platform_vars.common.environment}-key"   
+        secrets_manager:
+          arns: 
+          - "arn:aws:secretsmanager:${local.platform_vars.common.default_region}:${local.platform_vars.common.aws_account_id}:secret:${local.platform_vars.common.environment}-secrets"
+        parameter_store:
+          arns:
+          - "arn:aws:ssm:${local.platform_vars.common.default_region}:${local.platform_vars.common.aws_account_id}:parameter/${local.platform_vars.common.environment}/*"  
+        tags:
+          Environment: "dev"
+          Cluster: "dev-eks-cluster"
+          ManagedBy: "Terragrunt"  
+
+    istio:
+      inputs:
+        gateway_service_account_annotations:
+          eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/dev-istio-gateway"
+        gateway:
+          namespace: "${local.platform_vars.common.environment}-istio-system"
+          service:
+            type: "LoadBalancer"
+            annotations:
+              service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+              service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+            ports:
+              - name: http2
+                port: 80
+                targetPort: 80
+              - name: https
+                port: 443
+                targetPort: 443  
+        serviceAccount:
+          name: "istio-ingress-gateway"
+          annotations:
+            eks.amazonaws.com/role-arn: "arn:aws:iam::${local.platform_vars.common.aws_account_id}:role/${local.platform_vars.common.environment}-istio-gateway"
+        nodeSelector:
+            node.kubernetes.io/purpose: "ingress"
+            kubernetes.io/role: "ingress"     
+        defaultGateway:
+          name: "${local.platform_vars.common.environment}-default-gateway"
+          hosts:
+          - "*.${local.platform_vars.common.environment}.${local.platform_vars.common.domain}"
+          tls:
+            secretName: "${local.platform_vars.common.environment}-wildcard-tls"  
+        tags:
+          Environment: "dev"
+          Component: "istio"
+          ManagedBy: "terraform"
+          Team: "platform"
+          ClusterName: "dev-eks-cluster"    
+
+    jeager:
+      inputs:
+        jaeger_annotations:
+          eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/dev-jaeger-operator"
+        serviceAccount:
+            name: "jaeger-operator"
+            annotations:
+              eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/dev-jaeger-operator"
+        storage:
+            type: "memory"
+            options:
+              es:
+                server-urls: "http://elasticsearch-master:9200"    
+        ingress:
+            annotations:
+              kubernetes.io/ingress.class: "nginx"
+              cert-manager.io/cluster-issuer: "dev-letsencrypt"
+            hosts:
+              - "dev.jaeger.cloudon.work"  
+            ingress_tls: 
+              - hosts:
+                  - "dev.jaeger.cloudon.work"
+                secretName: "dev-jaeger-tls" 
+        jaeger_labels: 
+          app: "jaeger"
+          release: "dev-jaeger"               
+
+    karpenter:
+      inputs:
+
+    kong-gw:
+      inputs:
+        name: "kong-gateway"
+        database_password: "kong-password-123!"
+        allowed_cidrs: ["10.0.0.0/8"]
+        admin_allowed_cidrs: ["10.0.0.0/16"]
+
+    kubecost:
+      inputs:
+        ingress_host: "kubecost.cloudon.work"
+        ingress_annotations:
+          kubernetes.io/ingress.class: "nginx"
+          cert-manager.io/cluster-issuer: "dev-letsencrypt"
+          nginx.ingress.kubernetes.io/ssl-redirect: true
+        extra_values:
+          networkCosts.enabled: true
+          prometheus.server.retention: 7d
+        s3_bucket_name: "aws-cloudon-kubecost-bucket"  
+
+    loki-stack:
+      inputs:  
+        s3_bucket_name: "aws-cloudon-loki-bucket"
+        ingress_host: "loki.cloudon.work"
+        ingress_annotations:
+          kubernetes.io/ingress.class: "nginx"
+          cert-manager.io/cluster-issuer: "letsencrypt"
+          nginx.ingress.kubernetes.io/ssl-redirect: true
+
+    vault:
+      inputs:
+        service_account_annotations: 
+          eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/vault-server-role"   
+        ingress_host: "vault.cloudon.work"
+        ingress_annotations:
+          kubernetes.io/ingress.class: "nginx"
+          cert-manager.io/cluster-issuer: "letsencrypt"
+          nginx.ingress.kubernetes.io/ssl-redirect: true
+        iam_role_arn: "arn:aws:iam::123456789012:role/vault-server-role"  
+        kms_key_id: "alias/vault-auto-unseal"
+    
+
+
+
+  

@@ -1,0 +1,45 @@
+
+env:
+  database: postgres
+  pg_host: ${database_host}
+  pg_user: ${database_username}
+  pg_password: ${database_password}
+  pg_database: ${database_name}
+
+replicaCount: ${replica_count}
+
+proxy:
+  enabled: true
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+  tls:
+    enabled: ${enable_proxy_ssl}
+    cert: ${proxy_ssl_cert}
+    key: ${proxy_ssl_key}
+
+admin:
+  enabled: true
+  type: ClusterIP
+  
+enterprise:
+  enabled: false
+  
+ingressController:
+  enabled: true
+  installCRDs: true
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+resources:
+  requests:
+    cpu: ${resources.requests.cpu}
+    memory: ${resources.requests.memory}
+  limits:
+    cpu: ${resources.limits.cpu}
+    memory: ${resources.limits.memory}

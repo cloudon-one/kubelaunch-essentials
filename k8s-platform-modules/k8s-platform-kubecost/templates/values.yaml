@@ -1,0 +1,62 @@
+global:
+  prometheus:
+    enabled: ${prometheus_enabled}
+    nodeExporter:
+      enabled: true
+    kubeStateMetrics:
+      enabled: true
+    serviceName: kubecost-prometheus-server
+
+  grafana:
+    enabled: ${grafana_enabled}
+    deploymentAnnotations: {}
+    sidecar:
+      dashboards:
+        enabled: true
+
+kubecostProductConfigs:
+  clusterName: ${cluster_name}
+  productKey:
+    key: ${kubecost_token}
+
+serviceAccount:
+  create: false
+  name: ${service_account_name}
+
+ingress:
+  enabled: ${ingress_enabled}
+  %{ if ingress_enabled }
+  hosts:
+    - host: ${ingress_host}
+      paths:
+        - path: /
+          pathType: Prefix
+  annotations: ${jsonencode(ingress_annotations)}
+  %{ endif }
+
+prometheus:
+  server:
+    global:
+      external_labels:
+        cluster: ${cluster_name}
+    persistentVolume:
+      enabled: true
+      size: 32Gi
+
+thanos:
+  store:
+    enabled: true
+  bucket:
+    s3:
+      bucket: ${s3_bucket_name}
+      region: ${s3_region}
+      access_key: ${aws_access_key_id}
+      secret_key: ${aws_secret_key}
+
+resources:
+  requests:
+    cpu: ${resources.requests.cpu}
+    memory: ${resources.requests.memory}
+  limits:
+    cpu: ${resources.limits.cpu}
+    memory: ${resources.limits.memory}
