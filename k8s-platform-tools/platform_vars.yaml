@@ -253,17 +253,409 @@ Platform:
 
     vault:
       inputs:
-        service_account_annotations: 
-          eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/vault-server-role"   
+        service_account_annotations:
+          eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/vault-server-role"
         ingress_host: "vault.cloudon.work"
         ingress_annotations:
           kubernetes.io/ingress.class: "nginx"
           cert-manager.io/cluster-issuer: "letsencrypt"
           nginx.ingress.kubernetes.io/ssl-redirect: true
-        iam_role_arn: "arn:aws:iam::123456789012:role/vault-server-role"  
+        iam_role_arn: "arn:aws:iam::123456789012:role/vault-server-role"
         kms_key_id: "alias/vault-auto-unseal"
-    
+
+  Security:
+    kyverno:
+      inputs:
+        chart_version: "3.1.0"
+        namespace: "kyverno"
+        replica_count: 3
+        background_controller_replicas: 2
+        reports_controller_replicas: 2
+        admission_controller_replicas: 3
+        pod_security_standard: "restricted"
+
+        # Resource limits
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+
+        # Pod disruption budget
+        pod_disruption_budget:
+          enabled: true
+          min_available: 1
+
+        # Security context
+        security_context:
+          runAsNonRoot: true
+          runAsUser: 1000
+          fsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+
+        container_security_context:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+
+        # Policies to deploy
+        policies:
+          require_approved_registries:
+            enabled: true
+            validation_failure_action: "Enforce"
+            background: true
+            approved_registries:
+            - "*.dkr.ecr.*.amazonaws.com/*"
+            - "ghcr.io/*"
+            - "quay.io/*"
+
+          require_image_tag:
+            enabled: true
+            validation_failure_action: "Enforce"
+            background: true
+            deny_latest: true
+
+          require_resource_limits:
+            enabled: true
+            validation_failure_action: "Enforce"
+            background: true
+
+          require_security_context:
+            enabled: true
+            validation_failure_action: "Enforce"
+            background: true
+            excluded_namespaces:
+            - "kube-system"
+            - "istio-system"
+
+        # Network policies for Kyverno namespace
+        network_policies:
+          enabled: true
+          default_deny: true
+          allow_dns: true
+          allow_kubernetes_api: true
+          egress_to_internet: true  # For webhook calls
+
+    falco:
+      inputs:
+        chart_version: "4.0.0"
+        namespace: "falco"
+
+        # Use eBPF driver (modern, no kernel module needed)
+        driver:
+          kind: "ebpf"
+          enabled: true
+
+        # Resource limits
+        resources:
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+
+        # Security context
+        security_context:
+          privileged: false
+          capabilities:
+            add:
+            - BPF
+            - SYS_RESOURCE
+            - PERFMON
+            - SYS_PTRACE
+
+        # Falco configuration
+        falco_config:
+          rules_file:
+          - /etc/falco/falco_rules.yaml
+          - /etc/falco/falco_rules.local.yaml
+          - /etc/falco/k8s_audit_rules.yaml
+          - /etc/falco/rules.d
+
+          json_output: true
+          json_include_output_property: true
+          log_stderr: true
+          log_syslog: false
+          log_level: "info"
+
+          priority: "notice"
+          buffered_outputs: false
+          outputs_queue:
+            capacity: 0
+
+          syscall_event_drops:
+            actions:
+            - log
+            - alert
+            rate: 0.03333
+            max_burst: 10
+
+          output_timeout: 2000
+
+        # CloudWatch integration for alerts
+        integrations:
+          cloudwatch:
+            enabled: true
+            log_group_name: "/aws/eks/${environment}/falco"
+            log_stream_name: "falco-alerts"
+            region: "${aws_region}"
+
+        # Custom detection rules
+        custom_rules:
+          # Detect privileged container launches
+          - rule: "Launch Privileged Container"
+            desc: "Detect the initial process started in a privileged container"
+            condition: "container_started and container.privileged=true"
+            output: "Privileged container started (user=%user.name command=%proc.cmdline %container.info)"
+            priority: "WARNING"
+
+          # Detect sensitive file access
+          - rule: "Read sensitive file untrusted"
+            desc: "Detect attempts to read sensitive files by untrusted programs"
+            condition: "open_read and sensitive_files and proc_name_exists and not trusted_programs"
+            output: "Sensitive file opened for reading by non-trusted program (user=%user.name command=%proc.cmdline file=%fd.name)"
+            priority: "WARNING"
+
+          # Detect network connections from containers
+          - rule: "Outbound Connection to C2 Servers"
+            desc: "Detect outbound connections to known C2 servers"
+            condition: "outbound and fd.sip in (suspicious_ips)"
+            output: "Outbound connection to suspicious IP (user=%user.name command=%proc.cmdline connection=%fd.name)"
+            priority: "CRITICAL"
+
+        # IRSA for CloudWatch
+        service_account:
+          name: "falco"
+          annotations:
+            eks.amazonaws.com/role-arn: "arn:aws:iam::${aws_account_id}:role/${environment}-falco-role"
+
+        # Tolerations for running on all nodes
+        tolerations:
+        - effect: NoSchedule
+          operator: Exists
+
+        # DaemonSet for node coverage
+        daemonset:
+          enabled: true
+          update_strategy:
+            type: RollingUpdate
+
+    velero:
+      inputs:
+        chart_version: "5.1.0"
+        namespace: "velero"
+
+        # Backup storage configuration
+        backup_storage_location:
+          name: "default"
+          provider: "aws"
+          bucket: "${owner}-${environment}-velero-backups"
+          prefix: "backups"
+          config:
+            region: "${aws_region}"
+            kms_key_id: "alias/${environment}-velero-backup"
+
+        # Snapshot configuration
+        volume_snapshot_location:
+          name: "default"
+          provider: "aws"
+          config:
+            region: "${aws_region}"
+
+        # IRSA for S3 and EBS access
+        service_account:
+          server:
+            name: "velero"
+            annotations:
+              eks.amazonaws.com/role-arn: "arn:aws:iam::${aws_account_id}:role/${environment}-velero-role"
+
+        # Resource limits
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+
+        # Security context
+        security_context:
+          runAsNonRoot: true
+          runAsUser: 1000
+          fsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+
+        container_security_context:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+
+        # Backup schedules
+        schedules:
+          # Daily full cluster backup
+          daily_full:
+            disabled: false
+            schedule: "0 2 * * *"  # 2 AM daily
+            template:
+              ttl: "720h"  # 30 days retention
+              includedNamespaces:
+              - "*"
+              excludedNamespaces:
+              - "kube-system"
+              - "kube-public"
+              snapshotVolumes: true
+              storageLocation: "default"
+
+          # Hourly backup of critical namespaces
+          hourly_critical:
+            disabled: false
+            schedule: "0 * * * *"  # Every hour
+            template:
+              ttl: "168h"  # 7 days retention
+              includedNamespaces:
+              - "argocd"
+              - "vault"
+              - "atlantis"
+              - "external-secrets"
+              snapshotVolumes: true
+              storageLocation: "default"
+
+          # Weekly backup before maintenance
+          weekly_maintenance:
+            disabled: false
+            schedule: "0 0 * * 0"  # Sundays at midnight
+            template:
+              ttl: "2160h"  # 90 days retention
+              includedNamespaces:
+              - "*"
+              snapshotVolumes: true
+              storageLocation: "default"
+
+        # Node-agent (Restic) for file-level backups
+        node_agent:
+          enabled: true
+          pod_volume_path: "/var/lib/kubelet/pods"
+          privileged: false
+          resources:
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+          tolerations:
+          - effect: NoSchedule
+            operator: Exists
+
+        # Default backup settings
+        configuration:
+          backup_storage_location: "default"
+          volume_snapshot_location: "default"
+          log_level: "info"
+          log_format: "json"
+          default_volumes_to_fs_backup: false
+          restore_only_mode: false
+
+          # Features
+          features: "EnableCSI"
+
+          # Default backup TTL
+          default_backup_ttl: "720h"  # 30 days
+
+          # Garbage collection
+          garbage_collection_frequency: "24h"
+
+        # Metrics for monitoring
+        metrics:
+          enabled: true
+          service_monitor:
+            enabled: true
+            additional_labels:
+              prometheus: "kube-prometheus"
+
+  Observability:
+    compliance-scanner:
+      inputs:
+        chart_version: "0.9.0"
+        namespace: "compliance-scanner"
+
+        # CIS Benchmark scanning schedule
+        scan_schedule: "0 3 * * 1"  # Weekly on Monday at 3 AM
+
+        # Benchmark version
+        benchmark_version: "cis-1.8"
+
+        # Target types to scan
+        targets:
+          - "master"
+          - "node"
+          - "etcd"
+          - "policies"
+
+        # Results storage
+        results:
+          storage_type: "s3"
+          s3_bucket: "${owner}-${environment}-compliance-reports"
+          retention_days: 365
+
+        # Report generation
+        reports:
+          enabled: true
+          format: "json"
+          include_remediations: true
+          notify_on_failures: true
+
+        # CloudWatch integration
+        cloudwatch:
+          enabled: true
+          log_group: "/aws/eks/${environment}/compliance-scanner"
+          metric_namespace: "Security/Compliance"
+
+        # SNS notifications for compliance issues
+        notifications:
+          sns_topic_arn: "arn:aws:sns:${aws_region}:${aws_account_id}:${environment}-compliance-alerts"
+          severity_threshold: "medium"  # Notify on medium, high, critical
+
+        # IAM for S3 and CloudWatch
+        service_account:
+          name: "compliance-scanner"
+          annotations:
+            eks.amazonaws.com/role-arn: "arn:aws:iam::${aws_account_id}:role/${environment}-compliance-scanner-role"
+
+        # Resource limits
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+
+        # Security context
+        security_context:
+          runAsNonRoot: true
+          runAsUser: 1000
+          fsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+
+        container_security_context:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
 
 
-
-  
