@@ -1,0 +1,47 @@
+CLAUDE.md
+
+# Security sensitive files
+*.pem
+*.key
+*.p12
+*.pfx
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+*.env
+*.env.*
+.env.local
+.env.*.local
+secrets.yaml
+credentials.json
+service-account*.json
+
+# Terraform/Terragrunt sensitive
+*.tfvars
+*.tfvars.json
+.terraform/
+.terragrunt-cache/
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Backup files
+*.backup
+*.bak
+*.old
+platform_vars.yaml.backup
+
+# Audit reports
+*-audit-report.txt
+security-scan-*.txt
+credential-audit-report.txt
+IMPLEMENTATION_STATUS.md
+PHASE1_FOUNDATION_SECURITY_DEPLOYMENT.md
+PHASE2_SECURITY_DEPLOYMENT.md
+SECURITY_IMPLEMENTATION_PLAN_PART2.md
+SECURITY_IMPLEMENTATION_PLAN.md
+SECURITY_REVIEW.md
+INFRASTRUCTURE_AS_CODE_SUMMARY.md
+PHASE3_OPERATIONAL_SECURITY_DEPLOYMENT.md

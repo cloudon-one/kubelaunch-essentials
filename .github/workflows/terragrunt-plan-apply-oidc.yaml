@@ -1,0 +1,166 @@
+name: Terragrunt Plan & Apply (OIDC)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        type: choice
+        description: Select environment for Terragrunt execution
+        options:
+          - dev
+          - qa
+          - prod
+        required: true
+        default: dev
+      action:
+        type: choice
+        description: Select action to perform
+        options:
+          - plan
+          - apply
+        required: true
+        default: plan
+
+permissions:
+  id-token: write      # Required for OIDC
+  contents: read       # Required for checkout
+  issues: write        # Required for approval workflow
+  pull-requests: write # Required for PR comments
+
+env:
+  AWS_REGION: us-east-2
+  ENVIRONMENT: ${{ github.event.inputs.env || 'dev' }}
+  TERRAFORM_VERSION: 1.9.8
+  TERRAGRUNT_VERSION: 0.68.4
+
+jobs:
+  terragrunt-plan-apply:
+    name: "Terragrunt ${{ github.event.inputs.action || 'plan' }}"
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.env || 'dev' }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+          # Session tags for audit trail
+          role-skip-session-tagging: false
+
+      - name: Verify AWS Identity
+        run: |
+          echo "Verifying AWS OIDC authentication..."
+          aws sts get-caller-identity
+          echo "✓ Successfully authenticated as: $(aws sts get-caller-identity --query Arn --output text)"
+          echo "Session: GitHubActions-${{ github.run_id }}-${{ github.run_attempt }}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Setup Terragrunt
+        run: |
+          wget -q -O /usr/local/bin/terragrunt \
+            "https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64"
+          chmod +x /usr/local/bin/terragrunt
+          terragrunt --version
+
+      - name: Terragrunt Init
+        working-directory: k8s-platform-tools
+        run: |
+          echo "Initializing Terragrunt..."
+          terragrunt run-all init --terragrunt-non-interactive
+
+      - name: Terragrunt Validate
+        working-directory: k8s-platform-tools
+        run: |
+          echo "Validating Terraform configurations..."
+          terragrunt run-all validate --terragrunt-non-interactive
+
+      - name: Terragrunt Plan
+        id: plan
+        working-directory: k8s-platform-tools
+        run: |
+          echo "Running Terragrunt plan..."
+          terragrunt run-all plan \
+            --terragrunt-non-interactive \
+            --terragrunt-out-dir /tmp/plans \
+            | tee /tmp/plan-output.txt
+
+          # Check if plan has changes
+          if grep -q "No changes" /tmp/plan-output.txt; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Plan Output
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terragrunt-plan-${{ github.run_id }}
+          path: /tmp/plan-output.txt
+          retention-days: 30
+
+      - name: Request Apply Approval
+        if: |
+          github.event.inputs.action == 'apply' &&
+          steps.plan.outputs.has_changes == 'true'
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: ${{ vars.TERRAFORM_APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "🔐 Infrastructure Change Approval Required for ${{ env.ENVIRONMENT }}"
+          issue-body: |
+            **Environment:** ${{ env.ENVIRONMENT }}
+            **Triggered by:** @${{ github.actor }}
+            **Run ID:** ${{ github.run_id }}
+            **Workflow:** ${{ github.workflow }}
+
+            Please review the Terragrunt plan output and approve or deny this deployment.
+
+            **Plan Artifact:** [Download Plan](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            ### Approval Process
+            - Review the plan changes carefully
+            - Verify no destructive changes
+            - Check resource modifications
+            - Approve by commenting: `/approve`
+            - Deny by commenting: `/deny`
+
+      - name: Terragrunt Apply
+        if: |
+          github.event.inputs.action == 'apply' &&
+          steps.plan.outputs.has_changes == 'true'
+        working-directory: k8s-platform-tools
+        run: |
+          echo "Applying Terragrunt changes..."
+          terragrunt run-all apply \
+            --terragrunt-non-interactive \
+            --terragrunt-working-dir .
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Terragrunt ${{ github.event.inputs.action || 'plan' }} Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Action:** ${{ github.event.inputs.action || 'plan' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **AWS Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Has Changes:** ${{ steps.plan.outputs.has_changes }}" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "- **Status:** ✓ Success" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Status:** ✗ Failed" >> $GITHUB_STEP_SUMMARY
+          fi
